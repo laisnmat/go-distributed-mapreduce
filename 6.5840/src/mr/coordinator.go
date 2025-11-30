@@ -41,6 +41,7 @@ type Coordinator struct {
 	mapTasks    []Task
 	reduceTasks []Task
 	nReduce     int
+	nMap        int
 	mapDone     bool
 	reduceDone  bool
 }
@@ -93,6 +94,7 @@ func handleReply(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskTy
 			reply.TaskType = taskType
 			reply.TaskId = i
 			reply.NReduce = c.nReduce
+			reply.NMap = c.nMap
 			if taskType == MapTask {
 				reply.File = task.File
 			} else {
@@ -104,15 +106,16 @@ func handleReply(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskTy
 	return false
 }
 
-func (c *Coordinator) SetTaskDone(taskId int, taskType TaskType) {
+func (c *Coordinator) SetTaskDone(args *TaskDoneArgs, reply *TaskDoneReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	switch taskType {
+	switch args.TaskType {
 	case MapTask:
-		c.mapTasks[taskId].Status = Completed
+		c.mapTasks[args.TaskId].Status = Completed
 	case ReduceTask:
-		c.reduceTasks[taskId].Status = Completed
+		c.reduceTasks[args.TaskId].Status = Completed
 	}
+	return nil
 }
 
 // an example RPC handler.
@@ -153,6 +156,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		mapTasks:    make([]Task, len(files)),
 		reduceTasks: make([]Task, nReduce),
 		nReduce:     nReduce,
+		nMap:        len(files),
 	}
 	for i, file := range files {
 		c.mapTasks[i] = Task{

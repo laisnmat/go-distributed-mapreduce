@@ -82,20 +82,23 @@ func handleMapTask(reply TaskReply, mapf func(string, string) []KeyValue) {
 
 func writeIntermediateFiles(buckets [][]KeyValue, reply TaskReply) {
 	for i := 0; i < reply.NReduce; i++ {
-		finalFileName := fmt.Sprintf("mr-%d-%d", reply.TaskId, i)
-		tempFile, tempErr := ioutil.TempFile("", "mr-tmp-*")
+		oname := fmt.Sprintf("mr-%d-%d", reply.TaskId, i)
+		ofile, tempErr := ioutil.TempFile("", "mr-tmp-*")
 		if tempErr != nil {
 			log.Fatal("TempFile error:", tempErr)
 		}
-		enc := json.NewEncoder(tempFile)
+		enc := json.NewEncoder(ofile)
 		for _, kv := range buckets[i] {
 			encodeErr := enc.Encode(&kv)
 			if encodeErr != nil {
 				log.Fatal("Encode error:", encodeErr)
 			}
 		}
-		tempFile.Close()
-		os.Rename(tempFile.Name(), finalFileName)
+		ofile.Close()
+		moveFileErr := MoveFile(ofile.Name(), oname)
+		if moveFileErr != nil {
+			log.Fatal("MoveFile error:", moveFileErr)
+		}
 	}
 }
 
@@ -122,13 +125,16 @@ func handleReduceTask(reply TaskReply, reducef func(string, []string) string) {
 		i = j
 	}
 	ofile.Close()
-	os.Rename(ofile.Name(), oname)
+	moveFileErr := MoveFile(ofile.Name(), oname)
+	if moveFileErr != nil {
+		log.Fatal("MoveFile error:", moveFileErr)
+	}
 }
 
 func readIntermediateFiles(reply TaskReply) []KeyValue {
 	intermediate := []KeyValue{}
-	for m := 0; m < reply.NReduce; m++ {
-		filename := fmt.Sprintf("mr-%d-%d", m, reply.TaskId)
+	for mapId := 0; mapId < reply.NMap; mapId++ {
+		filename := fmt.Sprintf("mr-%d-%d", mapId, reply.TaskId)
 		file, err := os.Open(filename)
 		if err != nil {
 			log.Printf("cannot open %v", filename)
