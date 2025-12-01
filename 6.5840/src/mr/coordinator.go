@@ -10,6 +10,7 @@ import (
 )
 
 const WorkerTimeout = 10 * time.Second
+const CheckInterval = 2 * time.Second
 
 type TaskType int
 
@@ -29,10 +30,17 @@ const (
 )
 
 type Task struct {
-	Id        int
-	File      string
-	Status    TaskStatus
-	StartTime time.Time
+	Id         int
+	File       string
+	Status     TaskStatus
+	StartTime  time.Time
+	WorkerAddr string
+}
+
+type WorkerInfo struct {
+	Addr     string
+	Alive    bool
+	LastSeen time.Time
 }
 
 type Coordinator struct {
@@ -44,18 +52,31 @@ type Coordinator struct {
 	mapDone     bool
 	reduceDone  bool
 	mapsAddr    map[int]string
+	workers     map[string]*WorkerInfo
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	mapTasksReply := handleTask(c, reply, c.mapTasks, MapTask)
+	if args.WorkerAddress != "" {
+		if w, ok := c.workers[args.WorkerAddress]; ok {
+			w.LastSeen = time.Now()
+			w.Alive = true
+		} else {
+			c.workers[args.WorkerAddress] = &WorkerInfo{
+				Addr:     args.WorkerAddress,
+				Alive:    true,
+				LastSeen: time.Now(),
+			}
+		}
+	}
+	mapTasksReply := handleTask(c, args, reply, c.mapTasks, MapTask)
 	if mapTasksReply {
 		return nil
 	}
 	if c.mapDone {
-		reduceTasksReply := handleTask(c, reply, c.reduceTasks, ReduceTask)
+		reduceTasksReply := handleTask(c, args, reply, c.reduceTasks, ReduceTask)
 		if reduceTasksReply {
 			return nil
 		}
@@ -68,8 +89,8 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 	return nil
 }
 
-func handleTask(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskType) bool {
-	hasReply := handleReply(c, reply, tasks, taskType)
+func handleTask(c *Coordinator, args *TaskArgs, reply *TaskReply, tasks []Task, taskType TaskType) bool {
+	hasReply := handleReply(c, args, reply, tasks, taskType)
 	tasksCompleted := true
 	for _, task := range tasks {
 		if task.Status != Completed {
@@ -85,12 +106,13 @@ func handleTask(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskTyp
 	return hasReply
 }
 
-func handleReply(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskType) bool {
+func handleReply(c *Coordinator, args *TaskArgs, reply *TaskReply, tasks []Task, taskType TaskType) bool {
 	for i := range tasks {
 		task := &tasks[i]
 		if task.Status == Idle || (task.Status == InProgress && time.Since(task.StartTime) > WorkerTimeout) {
 			task.Status = InProgress
 			task.StartTime = time.Now()
+			task.WorkerAddr = args.WorkerAddress
 			reply.TaskType = taskType
 			reply.TaskId = i
 			reply.NReduce = c.nReduce
@@ -117,9 +139,11 @@ func (c *Coordinator) SetTaskDone(args *TaskDoneArgs, reply *TaskDoneReply) erro
 	switch args.TaskType {
 	case MapTask:
 		c.mapTasks[args.TaskId].Status = Completed
+		c.mapTasks[args.TaskId].WorkerAddr = args.WorkerAddress
 		c.mapsAddr[args.TaskId] = args.WorkerAddress
 	case ReduceTask:
 		c.reduceTasks[args.TaskId].Status = Completed
+		c.reduceTasks[args.TaskId].WorkerAddr = args.WorkerAddress
 	}
 	return nil
 }
@@ -130,6 +154,88 @@ func (c *Coordinator) SetTaskDone(args *TaskDoneArgs, reply *TaskDoneReply) erro
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
+}
+
+func (c *Coordinator) monitorWorkers() {
+	ticker := time.NewTicker(CheckInterval)
+	for range ticker.C {
+		c.mutex.Lock()
+		addrs := make([]string, 0, len(c.workers))
+		for addr := range c.workers {
+			addrs = append(addrs, addr)
+		}
+		c.mutex.Unlock()
+
+		for _, addr := range addrs {
+			ok := callWorkerHeartbeat(addr)
+			if !ok {
+				c.handleWorkerFailure(addr)
+			} else {
+				c.mutex.Lock()
+				if w, ok := c.workers[addr]; ok {
+					w.LastSeen = time.Now()
+					w.Alive = true
+				} else {
+					c.workers[addr] = &WorkerInfo{
+						Addr:     addr,
+						Alive:    true,
+						LastSeen: time.Now(),
+					}
+				}
+				c.mutex.Unlock()
+			}
+		}
+	}
+}
+
+func callWorkerHeartbeat(workerAddr string) bool {
+	args := HeartbeatArgs{}
+	reply := HeartbeatReply{}
+	c, err := rpc.DialHTTP("tcp", workerAddr)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	if err := c.Call("Worker.Heartbeat", &args, &reply); err != nil {
+		return false
+	}
+	return reply.Alive
+}
+
+func (c *Coordinator) handleWorkerFailure(addr string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	w, ok := c.workers[addr]
+	if !ok || !w.Alive {
+		return
+	}
+	log.Printf("Coordinator: worker %s failed (no heartbeat). Resetting its tasks.", addr)
+	w.Alive = false
+	for i := range c.mapTasks {
+		task := &c.mapTasks[i]
+		if task.WorkerAddr == addr {
+			task.Status = Idle
+			task.StartTime = time.Time{}
+			task.WorkerAddr = ""
+			delete(c.mapsAddr, task.Id)
+		}
+	}
+	for i := range c.reduceTasks {
+		task := &c.reduceTasks[i]
+		if task.WorkerAddr == addr && task.Status == InProgress {
+			task.Status = Idle
+			task.StartTime = time.Time{}
+			task.WorkerAddr = ""
+		}
+	}
+	allMapsDone := true
+	for _, mt := range c.mapTasks {
+		if mt.Status != Completed {
+			allMapsDone = false
+			break
+		}
+	}
+	c.mapDone = allMapsDone
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -164,6 +270,7 @@ func MakeCoordinator(address string, files []string, nReduce int) *Coordinator {
 		nReduce:     nReduce,
 		nMap:        len(files),
 		mapsAddr:    make(map[int]string),
+		workers:     make(map[string]*WorkerInfo),
 	}
 	for i, file := range files {
 		c.mapTasks[i] = Task{
@@ -179,5 +286,6 @@ func MakeCoordinator(address string, files []string, nReduce int) *Coordinator {
 		}
 	}
 	c.server(address)
+	go c.monitorWorkers()
 	return &c
 }

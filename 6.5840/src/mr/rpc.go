@@ -26,6 +26,7 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type TaskArgs struct {
+	WorkerAddress string
 }
 
 type TaskReply struct {
@@ -52,6 +53,12 @@ type GetIntermediateArgs struct {
 
 type GetIntermediateReply struct {
 	Intermediate []KeyValue
+}
+
+type HeartbeatArgs struct{}
+
+type HeartbeatReply struct {
+	Alive bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name

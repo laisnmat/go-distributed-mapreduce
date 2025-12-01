@@ -253,3 +253,8 @@ func closeListener(w *WorkerStruct) {
 		w.Listener.Close()
 	}
 }
+
+func (w *WorkerStruct) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
+	reply.Alive = true
+	return nil
+}
