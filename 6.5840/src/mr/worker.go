@@ -31,7 +31,10 @@ type KeyValue struct {
 type WorkerStruct struct {
 	WorkerAddress      string
 	CoordinatorAddress string
+	Listener           net.Listener
 }
+
+const retries = 3
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -49,21 +52,28 @@ func Worker(workerAddress string, coordinatorAddress string, mapf func(string, s
 		CoordinatorAddress: coordinatorAddress,
 	}
 	w.server()
+	defer closeListener(w)
 	for {
 		args := TaskArgs{}
 		reply := TaskReply{}
-		ret := call(coordinatorAddress, "Coordinator.GetTask", &args, &reply)
+		ret := callRetry(coordinatorAddress, "Coordinator.GetTask", &args, &reply, retries)
 		if !ret {
-			log.Println("Coordinator unavailable, exiting worker")
+			log.Printf("Coordinator %v unavailable, exiting worker", coordinatorAddress)
 			return
 		}
 		switch reply.TaskType {
 		case MapTask:
 			handleMapTask(w, reply, mapf)
-			notifyCoordinator(w, MapTask, reply)
+			mapNotifyRet := notifyCoordinator(w, MapTask, reply)
+			if !mapNotifyRet {
+				return
+			}
 		case ReduceTask:
 			handleReduceTask(reply, reducef)
-			notifyCoordinator(w, ReduceTask, reply)
+			reduceNotifyRet := notifyCoordinator(w, ReduceTask, reply)
+			if !reduceNotifyRet {
+				return
+			}
 		case NoAvailableTask:
 			time.Sleep(time.Second)
 		case Exit:
@@ -92,13 +102,18 @@ func handleMapTask(w *WorkerStruct, reply TaskReply, mapf func(string, string) [
 	writeIntermediateFiles(buckets, reply)
 }
 
-func notifyCoordinator(w *WorkerStruct, taskType TaskType, reply TaskReply) {
+func notifyCoordinator(w *WorkerStruct, taskType TaskType, reply TaskReply) bool {
 	doneArgs := TaskDoneArgs{
 		TaskId:        reply.TaskId,
 		TaskType:      taskType,
 		WorkerAddress: w.WorkerAddress,
 	}
-	call(w.CoordinatorAddress, "Coordinator.SetTaskDone", &doneArgs, &TaskDoneReply{})
+	ret := callRetry(w.CoordinatorAddress, "Coordinator.SetTaskDone", &doneArgs, &TaskDoneReply{}, retries)
+	if !ret {
+		log.Printf("cannot connect to coordinator %v", w.CoordinatorAddress)
+		return false
+	}
+	return true
 }
 
 func readIntermediateFiles(reply TaskReply) []KeyValue {
@@ -109,11 +124,11 @@ func readIntermediateFiles(reply TaskReply) []KeyValue {
 			Filename: filename,
 		}
 		getReply := GetIntermediateReply{}
-		ret := call(addr, "Worker.GetIntermediate", &getArgs, &getReply)
+		ret := callRetry(addr, "Worker.GetIntermediate", &getArgs, &getReply, retries)
 		if ret {
 			intermediate = append(intermediate, getReply.Intermediate...)
 		} else {
-			log.Printf("Error: cannot call worker %s", addr)
+			log.Printf("cannot call worker %s", addr)
 		}
 	}
 	return intermediate
@@ -198,6 +213,7 @@ func (w *WorkerStruct) server() {
 	if err != nil {
 		log.Fatalf("Worker RPC listen error: %v", err)
 	}
+	w.Listener = l
 	go http.Serve(l, nil)
 }
 
@@ -220,4 +236,20 @@ func call(address string, rpcname string, args interface{}, reply interface{}) b
 
 	fmt.Println(err)
 	return false
+}
+
+func callRetry(address string, rpcname string, args interface{}, reply interface{}, retries int) bool {
+	for i := 0; i < retries; i++ {
+		if call(address, rpcname, args, reply) {
+			return true
+		}
+		time.Sleep(time.Second)
+	}
+	return false
+}
+
+func closeListener(w *WorkerStruct) {
+	if w.Listener != nil {
+		w.Listener.Close()
+	}
 }

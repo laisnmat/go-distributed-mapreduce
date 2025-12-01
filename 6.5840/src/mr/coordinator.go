@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const MaximumDuration = 10
+const WorkerTimeout = 10 * time.Second
 
 type TaskType int
 
@@ -88,7 +88,7 @@ func handleTask(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskTyp
 func handleReply(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskType) bool {
 	for i := range tasks {
 		task := &tasks[i]
-		if task.Status == Idle || (task.Status == InProgress && time.Since(task.StartTime) > MaximumDuration*time.Second) {
+		if task.Status == Idle || (task.Status == InProgress && time.Since(task.StartTime) > WorkerTimeout) {
 			task.Status = InProgress
 			task.StartTime = time.Now()
 			reply.TaskType = taskType
