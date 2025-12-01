@@ -124,7 +124,7 @@ func readIntermediateFiles(reply TaskReply) []KeyValue {
 			Filename: filename,
 		}
 		getReply := GetIntermediateReply{}
-		ret := callRetry(addr, "Worker.GetIntermediate", &getArgs, &getReply, retries)
+		ret := callRetry(addr, "WorkerStruct.GetIntermediate", &getArgs, &getReply, retries)
 		if ret {
 			intermediate = append(intermediate, getReply.Intermediate...)
 		} else {
