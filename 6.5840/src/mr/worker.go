@@ -52,7 +52,7 @@ func Worker(workerAddress string, coordinatorAddress string, mapf func(string, s
 	for {
 		args := TaskArgs{}
 		reply := TaskReply{}
-		ret := call("Coordinator.GetTask", coordinatorAddress, &args, &reply)
+		ret := call(coordinatorAddress, "Coordinator.GetTask", &args, &reply)
 		if !ret {
 			log.Println("Coordinator unavailable, exiting worker")
 			return
@@ -98,7 +98,7 @@ func notifyCoordinator(w *WorkerStruct, taskType TaskType, reply TaskReply) {
 		TaskType:      taskType,
 		WorkerAddress: w.WorkerAddress,
 	}
-	call("Coordinator.SetTaskDone", w.CoordinatorAddress, &doneArgs, &TaskDoneReply{})
+	call(w.CoordinatorAddress, "Coordinator.SetTaskDone", &doneArgs, &TaskDoneReply{})
 }
 
 func readIntermediateFiles(reply TaskReply) []KeyValue {
@@ -109,7 +109,7 @@ func readIntermediateFiles(reply TaskReply) []KeyValue {
 			Filename: filename,
 		}
 		getReply := GetIntermediateReply{}
-		ret := call("Worker.GetIntermediate", addr, &getArgs, &getReply)
+		ret := call(addr, "Worker.GetIntermediate", &getArgs, &getReply)
 		if ret {
 			intermediate = append(intermediate, getReply.Intermediate...)
 		} else {
