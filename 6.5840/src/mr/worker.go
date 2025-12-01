@@ -54,7 +54,7 @@ func Worker(workerAddress string, coordinatorAddress string, mapf func(string, s
 	w.server()
 	defer closeListener(w)
 	for {
-		args := TaskArgs{}
+		args := TaskArgs{WorkerAddress: workerAddress}
 		reply := TaskReply{}
 		ret := callRetry(coordinatorAddress, "Coordinator.GetTask", &args, &reply, retries)
 		if !ret {
@@ -170,6 +170,17 @@ func writeIntermediateFiles(buckets [][]KeyValue, reply TaskReply) {
 			}
 		}
 		ofile.Close()
+		/*
+			err := os.Rename(ofile.Name(), oname)
+			if err != nil {
+				log.Fatal("os.Rename error:", err)
+			}
+		*/
+		//I chose to use MoveFile even if rename is better bcs when
+		//I tried to run the program on remote machine, I had the errors: invalid cross-device link
+		//Bcs TempFile store temp files in /tmp which can be in a different partition
+		//and then os.rename had problems to access different partitions
+		//error also report here: https://gist.github.com/var23rav/23ae5d0d4d830aff886c3c970b8f6c6b
 		moveFileErr := MoveFile(ofile.Name(), oname)
 		if moveFileErr != nil {
 			log.Fatal("MoveFile error:", moveFileErr)
@@ -200,6 +211,17 @@ func handleReduceTask(reply TaskReply, reducef func(string, []string) string) {
 		i = j
 	}
 	ofile.Close()
+	/*
+		err := os.Rename(ofile.Name(), oname)
+		if err != nil {
+			log.Fatal("os.Rename error:", err)
+		}
+	*/
+	//I chose to use MoveFile even if rename is better bcs when
+	//I tried to run the program on remote machine, I had the errors: invalid cross-device link
+	//Bcs TempFile store temp files in /tmp which can be in a different partition
+	//and then os.rename had problems to access different partitions
+	//error also report here: https://gist.github.com/var23rav/23ae5d0d4d830aff886c3c970b8f6c6b
 	moveFileErr := MoveFile(ofile.Name(), oname)
 	if moveFileErr != nil {
 		log.Fatal("MoveFile error:", moveFileErr)
@@ -255,6 +277,5 @@ func closeListener(w *WorkerStruct) {
 }
 
 func (w *WorkerStruct) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
-	reply.Alive = true
 	return nil
 }

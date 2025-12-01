@@ -55,10 +55,10 @@ type GetIntermediateReply struct {
 	Intermediate []KeyValue
 }
 
-type HeartbeatArgs struct{}
+type HeartbeatArgs struct {
+}
 
 type HeartbeatReply struct {
-	Alive bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
