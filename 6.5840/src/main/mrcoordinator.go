@@ -9,18 +9,26 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "time"
-import "os"
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"6.5840/mr"
+)
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator <coordinator_IP> <coordinator_PORT> <inputfiles...>\n")
 		os.Exit(1)
 	}
 
-	m := mr.MakeCoordinator(os.Args[1:], 10)
+	coordinatorIP := os.Args[1]
+	coordinatorPort := os.Args[2]
+	inputFiles := os.Args[3:]
+	address := coordinatorIP + ":" + coordinatorPort
+
+	m := mr.MakeCoordinator(address, inputFiles, 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}

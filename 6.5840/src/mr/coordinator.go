@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
-	"os"
 	"sync"
 	"time"
 )
@@ -44,6 +43,7 @@ type Coordinator struct {
 	nMap        int
 	mapDone     bool
 	reduceDone  bool
+	mapsAddr    map[int]string
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -97,8 +97,13 @@ func handleReply(c *Coordinator, reply *TaskReply, tasks []Task, taskType TaskTy
 			reply.NMap = c.nMap
 			if taskType == MapTask {
 				reply.File = task.File
+				reply.MapsAddr = nil
 			} else {
 				reply.File = ""
+				reply.MapsAddr = make(map[int]string)
+				for k, v := range c.mapsAddr {
+					reply.MapsAddr[k] = v
+				}
 			}
 			return true
 		}
@@ -112,6 +117,7 @@ func (c *Coordinator) SetTaskDone(args *TaskDoneArgs, reply *TaskDoneReply) erro
 	switch args.TaskType {
 	case MapTask:
 		c.mapTasks[args.TaskId].Status = Completed
+		c.mapsAddr[args.TaskId] = args.WorkerAddress
 	case ReduceTask:
 		c.reduceTasks[args.TaskId].Status = Completed
 	}
@@ -127,13 +133,13 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 // start a thread that listens for RPCs from worker.go
-func (c *Coordinator) server() {
+func (c *Coordinator) server(address string) {
 	rpc.Register(c)
 	rpc.HandleHTTP()
-	//l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
+	l, e := net.Listen("tcp", address)
+	//sockname := coordinatorSock()
+	//os.Remove(sockname)
+	//l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
@@ -151,12 +157,13 @@ func (c *Coordinator) Done() bool {
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
+func MakeCoordinator(address string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		mapTasks:    make([]Task, len(files)),
 		reduceTasks: make([]Task, nReduce),
 		nReduce:     nReduce,
 		nMap:        len(files),
+		mapsAddr:    make(map[int]string),
 	}
 	for i, file := range files {
 		c.mapTasks[i] = Task{
@@ -171,6 +178,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Status: Idle,
 		}
 	}
-	c.server()
+	c.server(address)
 	return &c
 }

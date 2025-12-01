@@ -6,6 +6,8 @@ import (
 	"hash/fnv"
 	"io/ioutil"
 	"log"
+	"net"
+	"net/http"
 	"net/rpc"
 	"os"
 	"sort"
@@ -26,6 +28,11 @@ type KeyValue struct {
 	Value string
 }
 
+type WorkerStruct struct {
+	WorkerAddress      string
+	CoordinatorAddress string
+}
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -35,23 +42,28 @@ func ihash(key string) int {
 }
 
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue,
+func Worker(workerAddress string, coordinatorAddress string, mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	w := &WorkerStruct{
+		WorkerAddress:      workerAddress,
+		CoordinatorAddress: coordinatorAddress,
+	}
+	w.server()
 	for {
 		args := TaskArgs{}
 		reply := TaskReply{}
-		ret := call("Coordinator.GetTask", &args, &reply)
+		ret := call("Coordinator.GetTask", coordinatorAddress, &args, &reply)
 		if !ret {
 			log.Println("Coordinator unavailable, exiting worker")
 			return
 		}
 		switch reply.TaskType {
 		case MapTask:
-			handleMapTask(reply, mapf)
-			call("Coordinator.SetTaskDone", &TaskDoneArgs{TaskId: reply.TaskId, TaskType: MapTask}, &TaskDoneReply{})
+			handleMapTask(w, reply, mapf)
+			notifyCoordinator(w, MapTask, reply)
 		case ReduceTask:
 			handleReduceTask(reply, reducef)
-			call("Coordinator.SetTaskDone", &TaskDoneArgs{TaskId: reply.TaskId, TaskType: ReduceTask}, &TaskDoneReply{})
+			notifyCoordinator(w, ReduceTask, reply)
 		case NoAvailableTask:
 			time.Sleep(time.Second)
 		case Exit:
@@ -60,7 +72,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-func handleMapTask(reply TaskReply, mapf func(string, string) []KeyValue) {
+func handleMapTask(w *WorkerStruct, reply TaskReply, mapf func(string, string) []KeyValue) {
 	filename := reply.File
 	file, err := os.Open(filename)
 	if err != nil {
@@ -78,6 +90,54 @@ func handleMapTask(reply TaskReply, mapf func(string, string) []KeyValue) {
 		buckets[h] = append(buckets[h], kv)
 	}
 	writeIntermediateFiles(buckets, reply)
+}
+
+func notifyCoordinator(w *WorkerStruct, taskType TaskType, reply TaskReply) {
+	doneArgs := TaskDoneArgs{
+		TaskId:        reply.TaskId,
+		TaskType:      taskType,
+		WorkerAddress: w.WorkerAddress,
+	}
+	call("Coordinator.SetTaskDone", w.CoordinatorAddress, &doneArgs, &TaskDoneReply{})
+}
+
+func readIntermediateFiles(reply TaskReply) []KeyValue {
+	intermediate := []KeyValue{}
+	for mapId, addr := range reply.MapsAddr {
+		filename := fmt.Sprintf("mr-%d-%d", mapId, reply.TaskId)
+		getArgs := GetIntermediateArgs{
+			Filename: filename,
+		}
+		getReply := GetIntermediateReply{}
+		ret := call("Worker.GetIntermediate", addr, &getArgs, &getReply)
+		if ret {
+			intermediate = append(intermediate, getReply.Intermediate...)
+		} else {
+			log.Printf("Error: cannot call worker %s", addr)
+		}
+	}
+	return intermediate
+}
+
+func (w *WorkerStruct) GetIntermediate(args *GetIntermediateArgs, reply *GetIntermediateReply) error {
+	intermediate := []KeyValue{}
+	file, err := os.Open(args.Filename)
+	if err != nil {
+		log.Printf("Cannot open intermediate file %s: %v", args.Filename, err)
+		reply.Intermediate = intermediate
+		return nil
+	}
+	defer file.Close()
+	dec := json.NewDecoder(file)
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err != nil {
+			break
+		}
+		intermediate = append(intermediate, kv)
+	}
+	reply.Intermediate = intermediate
+	return nil
 }
 
 func writeIntermediateFiles(buckets [][]KeyValue, reply TaskReply) {
@@ -131,62 +191,23 @@ func handleReduceTask(reply TaskReply, reducef func(string, []string) string) {
 	}
 }
 
-func readIntermediateFiles(reply TaskReply) []KeyValue {
-	intermediate := []KeyValue{}
-	for mapId := 0; mapId < reply.NMap; mapId++ {
-		filename := fmt.Sprintf("mr-%d-%d", mapId, reply.TaskId)
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Printf("cannot open %v", filename)
-			continue
-		}
-		dec := json.NewDecoder(file)
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				break
-			}
-			intermediate = append(intermediate, kv)
-		}
-		file.Close()
+func (w *WorkerStruct) server() {
+	rpc.Register(w)
+	rpc.HandleHTTP()
+	l, err := net.Listen("tcp", w.WorkerAddress)
+	if err != nil {
+		log.Fatalf("Worker RPC listen error: %v", err)
 	}
-	return intermediate
-}
-
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
-	}
+	go http.Serve(l, nil)
 }
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+func call(address string, rpcname string, args interface{}, reply interface{}) bool {
+	c, err := rpc.DialHTTP("tcp", address)
+	//sockname := coordinatorSock()
+	//c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}

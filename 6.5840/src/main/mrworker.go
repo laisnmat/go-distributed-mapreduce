@@ -10,21 +10,31 @@ package main
 // Please do not change this file.
 //
 
-import "6.5840/mr"
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"fmt"
+	"log"
+	"os"
+	"plugin"
+
+	"6.5840/mr"
+)
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
+	if len(os.Args) != 6 {
+		fmt.Fprintf(os.Stderr, "Usage: mrworker <worker_IP> <worker_Port> <coordinator_IP> <coordinator_Port> <plugin.so>\n")
 		os.Exit(1)
 	}
 
-	mapf, reducef := loadPlugin(os.Args[1])
+	workerIP := os.Args[1]
+	workerPort := os.Args[2]
+	coordinatorIP := os.Args[3]
+	coordinatorPort := os.Args[4]
+	pluginFile := os.Args[5]
+	workerAddress := workerIP + ":" + workerPort
+	coordinatorAddress := coordinatorIP + ":" + coordinatorPort
+	mapf, reducef := loadPlugin(pluginFile)
 
-	mr.Worker(mapf, reducef)
+	mr.Worker(workerAddress, coordinatorAddress, mapf, reducef)
 }
 
 // load the application Map and Reduce functions
