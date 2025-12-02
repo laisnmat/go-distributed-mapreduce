@@ -47,6 +47,15 @@ type TaskDoneArgs struct {
 type TaskDoneReply struct {
 }
 
+type TaskFailedArgs struct {
+	TaskId     int
+	TaskType   TaskType
+	WorkerAddr string
+	FailedMaps map[int]string
+}
+
+type TaskFailedReply struct{}
+
 type GetIntermediateArgs struct {
 	Filename string
 }

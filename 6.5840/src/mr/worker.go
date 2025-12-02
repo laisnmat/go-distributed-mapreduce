@@ -34,7 +34,7 @@ type WorkerStruct struct {
 	Listener           net.Listener
 }
 
-const retries = 3
+const retries = 2
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -63,16 +63,29 @@ func Worker(workerAddress string, coordinatorAddress string, mapf func(string, s
 		}
 		switch reply.TaskType {
 		case MapTask:
-			handleMapTask(w, reply, mapf)
-			mapNotifyRet := notifyCoordinator(w, MapTask, reply)
-			if !mapNotifyRet {
-				return
+			if !handleMapTask(w, reply, mapf) {
+				mapReportRet := reportTaskFailure(w, reply.TaskId, MapTask, nil)
+				if !mapReportRet {
+					return
+				}
+			} else {
+				mapNotifyRet := notifyCoordinator(w, MapTask, reply)
+				if !mapNotifyRet {
+					return
+				}
 			}
 		case ReduceTask:
-			handleReduceTask(reply, reducef)
-			reduceNotifyRet := notifyCoordinator(w, ReduceTask, reply)
-			if !reduceNotifyRet {
-				return
+			retHandleReduce, failedMaps := handleReduceTask(reply, reducef)
+			if !retHandleReduce {
+				reduceReportRet := reportTaskFailure(w, reply.TaskId, ReduceTask, failedMaps)
+				if !reduceReportRet {
+					return
+				}
+			} else {
+				reduceNotifyRet := notifyCoordinator(w, ReduceTask, reply)
+				if !reduceNotifyRet {
+					return
+				}
 			}
 		case NoAvailableTask:
 			time.Sleep(time.Second)
@@ -82,15 +95,17 @@ func Worker(workerAddress string, coordinatorAddress string, mapf func(string, s
 	}
 }
 
-func handleMapTask(w *WorkerStruct, reply TaskReply, mapf func(string, string) []KeyValue) {
+func handleMapTask(w *WorkerStruct, reply TaskReply, mapf func(string, string) []KeyValue) bool {
 	filename := reply.File
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Printf("cannot open %v", filename)
+		return false
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Printf("cannot read %v", filename)
+		return false
 	}
 	file.Close()
 	kva := mapf(filename, string(content))
@@ -99,7 +114,7 @@ func handleMapTask(w *WorkerStruct, reply TaskReply, mapf func(string, string) [
 		h := ihash(kv.Key) % reply.NReduce
 		buckets[h] = append(buckets[h], kv)
 	}
-	writeIntermediateFiles(buckets, reply)
+	return writeIntermediateFiles(buckets, reply)
 }
 
 func notifyCoordinator(w *WorkerStruct, taskType TaskType, reply TaskReply) bool {
@@ -116,8 +131,20 @@ func notifyCoordinator(w *WorkerStruct, taskType TaskType, reply TaskReply) bool
 	return true
 }
 
-func readIntermediateFiles(reply TaskReply) []KeyValue {
+func reportTaskFailure(w *WorkerStruct, taskId int, taskType TaskType, failedMaps map[int]string) bool {
+	args := TaskFailedArgs{TaskId: taskId, TaskType: taskType, WorkerAddr: w.WorkerAddress, FailedMaps: failedMaps}
+	reply := TaskFailedReply{}
+	ret := callRetry(w.CoordinatorAddress, "Coordinator.SetTaskFailed", &args, &reply, retries)
+	if !ret {
+		log.Printf("cannot connect to coordinator %v", w.CoordinatorAddress)
+		return false
+	}
+	return true
+}
+
+func readIntermediateFiles(reply TaskReply) ([]KeyValue, map[int]string) {
 	intermediate := []KeyValue{}
+	failedMaps := make(map[int]string)
 	for mapId, addr := range reply.MapsAddr {
 		filename := fmt.Sprintf("mr-%d-%d", mapId, reply.TaskId)
 		getArgs := GetIntermediateArgs{
@@ -129,9 +156,10 @@ func readIntermediateFiles(reply TaskReply) []KeyValue {
 			intermediate = append(intermediate, getReply.Intermediate...)
 		} else {
 			log.Printf("cannot call worker %s", addr)
+			failedMaps[mapId] = addr
 		}
 	}
-	return intermediate
+	return intermediate, failedMaps
 }
 
 func (w *WorkerStruct) GetIntermediate(args *GetIntermediateArgs, reply *GetIntermediateReply) error {
@@ -155,18 +183,20 @@ func (w *WorkerStruct) GetIntermediate(args *GetIntermediateArgs, reply *GetInte
 	return nil
 }
 
-func writeIntermediateFiles(buckets [][]KeyValue, reply TaskReply) {
+func writeIntermediateFiles(buckets [][]KeyValue, reply TaskReply) bool {
 	for i := 0; i < reply.NReduce; i++ {
 		oname := fmt.Sprintf("mr-%d-%d", reply.TaskId, i)
 		ofile, tempErr := ioutil.TempFile("", "mr-tmp-*")
 		if tempErr != nil {
-			log.Fatal("TempFile error:", tempErr)
+			log.Printf("TempFile error:", tempErr)
+			return false
 		}
 		enc := json.NewEncoder(ofile)
 		for _, kv := range buckets[i] {
 			encodeErr := enc.Encode(&kv)
 			if encodeErr != nil {
-				log.Fatal("Encode error:", encodeErr)
+				log.Printf("Encode error:", encodeErr)
+				return false
 			}
 		}
 		ofile.Close()
@@ -183,18 +213,24 @@ func writeIntermediateFiles(buckets [][]KeyValue, reply TaskReply) {
 		//error also report here: https://gist.github.com/var23rav/23ae5d0d4d830aff886c3c970b8f6c6b
 		moveFileErr := MoveFile(ofile.Name(), oname)
 		if moveFileErr != nil {
-			log.Fatal("MoveFile error:", moveFileErr)
+			log.Printf("MoveFile error:", moveFileErr)
+			return false
 		}
 	}
+	return true
 }
 
-func handleReduceTask(reply TaskReply, reducef func(string, []string) string) {
-	intermediate := readIntermediateFiles(reply)
+func handleReduceTask(reply TaskReply, reducef func(string, []string) string) (bool, map[int]string) {
+	intermediate, failedMaps := readIntermediateFiles(reply)
+	if len(failedMaps) > 0 {
+		return false, failedMaps
+	}
 	sort.Sort(ByKey(intermediate))
 	oname := fmt.Sprintf("mr-out-%d", reply.TaskId)
 	ofile, tempErr := ioutil.TempFile("", "mr-tmp-out-*")
 	if tempErr != nil {
-		log.Fatal("TempFile error:", tempErr)
+		log.Printf("TempFile error:", tempErr)
+		return false, nil
 	}
 	i := 0
 	for i < len(intermediate) {
@@ -224,8 +260,10 @@ func handleReduceTask(reply TaskReply, reducef func(string, []string) string) {
 	//error also report here: https://gist.github.com/var23rav/23ae5d0d4d830aff886c3c970b8f6c6b
 	moveFileErr := MoveFile(ofile.Name(), oname)
 	if moveFileErr != nil {
-		log.Fatal("MoveFile error:", moveFileErr)
+		log.Printf("MoveFile error:", moveFileErr)
+		return false, nil
 	}
+	return true, nil
 }
 
 func (w *WorkerStruct) server() {
@@ -247,7 +285,8 @@ func call(address string, rpcname string, args interface{}, reply interface{}) b
 	//sockname := coordinatorSock()
 	//c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Printf("dialing:", err)
+		return false
 	}
 	defer c.Close()
 

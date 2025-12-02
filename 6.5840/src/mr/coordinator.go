@@ -158,6 +158,22 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (c *Coordinator) SetTaskFailed(args *TaskFailedArgs, reply *TaskFailedReply) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	for _, addr := range args.FailedMaps {
+		resetTask(c, addr, c.mapTasks, MapTask)
+	}
+	switch args.TaskType {
+	case MapTask:
+		resetTask(c, args.WorkerAddr, c.mapTasks, MapTask)
+	case ReduceTask:
+		resetTask(c, args.WorkerAddr, c.reduceTasks, ReduceTask)
+	}
+	checkAllTasksCompleted(c)
+	return nil
+}
+
 func (c *Coordinator) heartBeatWorkers() {
 	ticker := time.NewTicker(HeartBeatInterval)
 	defer ticker.Stop()
